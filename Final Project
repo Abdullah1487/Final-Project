@@ -1,0 +1,342 @@
+I have uploaded two codes as  they are the ones I used on my essay. 
+
+Code 1:
+
+library(dplyr)
+library(purrr)
+library(hoopR)
+library(lme4)
+library(broom)
+library(ggplot2)
+library(randomForest)
+library(caret)
+
+players <- list(
+  "Steph" = list(id = 201939, seasons = c("2009-10", "2010-11", "2011-12", "2012-13", "2013-14", "2014-15", "2015-16", "2016-17", "2017-18", "2018-19", "2019-20", "2020-21", "2021-22", "2022-23")),
+  "Harden" = list(id = 201935, seasons = c("2009-10", "2010-11", "2011-12", "2012-13", "2014-15", "2015-16", "2016-17", "2017-18", "2018-19", "2019-20", "2020-21", "2021-22", "2022-23")),
+  "LeBron" = list(id = 2544, seasons = c("2003-04", "2004-05", "2005-06", "2006-07", "2007-08", "2008-09", "2009-10", "2010-11", "2011-12", "2012-13", "2013-14", "2014-15", "2015-16", "2016-17", "2017-18", "2018-19", "2019-20", "2020-21", "2021-22", "2022-23")),
+  "Durant" = list(id = 201142, seasons = c("2007-08", "2008-09", "2009-10", "2010-11", "2011-12", "2012-13", "2013-14", "2014-15", "2015-16", "2016-17", "2017-18", "2018-19", "2019-20", "2020-21", "2021-22", "2022-23")),
+  "Giannis" = list(id = 203507, seasons = c("2013-14", "2014-15", "2015-16", "2016-17", "2017-18", "2018-19", "2019-20", "2020-21", "2021-22", "2022-23")),
+  "Klay" = list(id = 202691, seasons = c("2011-12", "2012-13", "2013-14", "2014-15", "2015-16", "2016-17", "2017-18", "2018-19", "2020-21", "2021-22", "2022-23")),
+  "Westbrook" = list(id = 201566, seasons = c("2008-09", "2009-10", "2010-11", "2011-12", "2012-13", "2013-14", "2014-15", "2015-16", "2016-17", "2017-18", "2018-19", "2019-20", "2020-21", "2021-22", "2022-23")),
+  "Kyrie" = list(id = 202681, seasons = c("2011-12", "2012-13", "2013-14", "2014-15", "2015-16", "2016-17", "2017-18", "2018-19", "2019-20", "2020-21", "2021-22", "2022-23")),
+  "Damian" = list(id = 203081, seasons = c("2012-13", "2013-14", "2014-15", "2015-16", "2016-17", "2017-18", "2018-19", "2019-20", "2020-21", "2021-22", "2022-23")),
+  "Paul George" = list(id = 202331, seasons = c("2010-11", "2011-12", "2012-13", "2013-14", "2014-15", "2015-16", "2016-17", "2017-18", "2018-19", "2019-20", "2020-21", "2021-22", "2022-23"))
+)
+
+
+
+all_shots <- purrr::map_df(names(players), function(player_name) {
+  player_info <- players[[player_name]]
+  player_id <- player_info$id
+  player_seasons <- player_info$seasons
+  
+  purrr::map_df(player_seasons, function(season) {
+    res <- tryCatch({
+      nba_shotchartdetail(player_id = player_id, season = season)
+    }, error = function(e) {
+      message(paste("Error for", player_name, "in", season, ":", e$message))
+      return(NULL)
+    })
+    
+    if (!is.null(res) && "Shot_Chart_Detail" %in% names(res)) {
+      res$Shot_Chart_Detail %>%
+        mutate(
+          id = player_id,
+          name = player_name,
+          season = season
+        )
+    } else {
+      return(tibble())
+    }
+  })
+})
+
+
+
+shots_clean <- all_shots %>%
+  mutate(
+    made = as.numeric(SHOT_MADE_FLAG),
+    prev_shot = lag(as.numeric(SHOT_MADE_FLAG), 1),
+    distance = as.numeric(SHOT_DISTANCE),
+    is_2pt = ifelse(SHOT_TYPE == "2PT Field Goal", 1, 0),
+    move_type = as.factor(ACTION_TYPE),
+    zone = as.factor(SHOT_ZONE_BASIC),
+    is_home = ifelse(TEAM_NAME == HTM, 1, 0),
+    name = as.factor(name)
+  ) %>%
+  arrange(name, GAME_ID, PERIOD, desc(MINUTES_REMAINING), desc(SECONDS_REMAINING)) %>%
+  group_by(name, GAME_ID) %>%
+  mutate(prev_shot = lag(made, 1)) %>%
+  ungroup() %>%
+  filter(!is.na(prev_shot)) %>%
+  select(made, prev_shot, distance, is_2pt, move_type, zone, is_home, name)
+
+
+shots_clean <- shots_data_all %>%
+  mutate(
+    made = as.numeric(SHOT_MADE_FLAG),  # 1 = made, 0 = missed
+    distance = as.numeric(SHOT_DISTANCE),   # Shot distance in feet
+    is_home = ifelse(TEAM_NAME == HTM, 1, 0)   # 1 = home game, 0 = away game
+  ) %>%
+  select(name = player_name, season, GAME_ID, made, distance, is_home, SHOT_ZONE_BASIC)
+
+
+hot_hand_model <- glmer(
+  made ~ prev_shot + distance + is_2pt + zone + is_home + move_type + (1 | name),
+  data = shots_clean,
+  family = binomial(link = "logit"),
+  nAGQ = 0,
+  control = glmerControl(optimizer = "nloptwrap")
+)
+
+
+summary(hot_hand_model)
+
+
+
+simulations <- 10
+rand_coefs <- numeric(simulations)
+
+set.seed(123)
+for (i in seq_len(simulations)) {
+  rand_data <- shots_clean %>%
+    mutate(prev_shot = sample(prev_shot))
+  
+  rand_model <- glmer(
+    made ~ prev_shot + distance + is_2pt + zone + is_home + move_type + (1 | name),
+    data = rand_data,
+    family = binomial(link = "logit"),
+    nAGQ = 0,
+    control = glmerControl(optimizer = "nloptwrap")
+  )
+  
+  rand_coefs[i] <- summary(rand_model)$coefficients["prev_shot", "Estimate"]
+}
+
+
+actual_coef <- summary(hot_hand_model)$coefficients["prev_shot", "Estimate"]
+cat("Actual coefficient for prev_shot:", actual_coef, "\n")
+cat("Mean of randomized coefficients:", mean(rand_coefs), "\n")
+
+
+ggplot(data.frame(rand_coefs), aes(x = rand_coefs)) +
+  geom_histogram(binwidth = 0.01, fill = "blue", alpha = 0.7) +
+  geom_vline(xintercept = actual_coef, color = "red", linetype = "dashed", size = 1) +
+  labs(
+    title = "Monte Carlo Simulation: Coefficients for Previous Shot",
+    x = "Randomized Coefficients",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+
+
+
+split <- createDataPartition(shots_clean$made, p = 0.7, list = FALSE)
+train <- shots_clean[split, ]
+test <- shots_clean[-split, ]
+
+
+
+
+library(ranger)
+rf_model <- ranger(
+  made ~ prev_shot + distance + zone + move_type,
+  data = shots_clean,
+  probability = TRUE
+)
+
+print(rf_model)
+
+shots_clean$predicted_prob <- predict(rf_model, shots_clean)$predictions[, 2]
+ggplot(shots_clean, aes(x = distance, y = predicted_prob, color = factor(made))) +
+  geom_point(alpha = 0.5) +
+  labs(
+    title = "Predicted Probability of Making a Shot vs Shot Distance",
+    x = "Shot Distance (feet)",
+    y = "Predicted Probability",
+    color = "Actual Outcome"
+  ) +
+  theme_minimal()
+
+
+
+
+success_rate <- shots_clean %>%
+  group_by(name, GAME_ID) %>%
+  summarize(success_rate = mean(made, na.rm = TRUE), .groups = "drop")
+
+ggplot(success_rate, aes(x = GAME_ID, y = success_rate, color = name, group = name)) +
+  geom_line() +
+  labs(
+    title = "Success Rate Over Games",
+    x = "Game ID",
+    y = "Success Rate",
+    color = "Player"
+  ) +
+  theme_minimal()
+
+
+zone_count <- shots_clean %>%
+  group_by(name, SHOT_ZONE_BASIC) %>%
+  summarize(total_shots = n(), .groups = "drop")
+
+ggplot(zone_count, aes(x = SHOT_ZONE_BASIC, y = total_shots, fill = name)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Shot Distribution by Zone",
+    x = "Shot Zone",
+    y = "Total Shots",
+    fill = "Player"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+ggplot(success_rate, aes(x = success_rate, fill = name)) +
+  geom_histogram(binwidth = 0.05, alpha = 0.7, position = "dodge") +
+  labs(
+    title = "Distribution of Success Rates",
+    x = "Success Rate",
+    y = "Frequency",
+    fill = "Player"
+  ) +
+  theme_minimal()
+
+
+
+colnames(shots_clean)
+
+
+Code 2:
+
+
+library(dplyr)
+library(purrr)
+library(hoopR)
+library(lme4)
+library(ggplot2)
+remotes::install_github("sportsdataverse/hoopR")
+
+
+seasons <- c("2023-24")
+
+
+players <- c(
+  "Stephen Curry" = 201939,
+  "LeBron James" = 2544,
+  "Kevin Durant" = 201142,
+  "Jayson Tatum" = 1628369,
+  "Giannis Antetokounmpo" = 203507,
+  "Luka Doncic" = 1629029,
+  "Nikola Jokic" = 203999,
+  "Joel Embiid" = 203954,
+  "Damian Lillard" = 203081,
+  "Ja Morant" = 1629630
+)
+
+
+shots_data_all <- purrr::map_df(seasons, function(season) {
+  purrr::map_df(names(players), function(player_name) {
+    player_id <- players[[player_name]]
+    res <- nba_shotchartdetail(player_id = player_id, season = season)
+    
+    if ("Shot_Chart_Detail" %in% names(res)) {
+      scd <- res$Shot_Chart_Detail %>%
+        mutate(player_id = player_id,
+               player_name = player_name,
+               season = season)
+      return(scd)
+    } else {
+      message(paste("Error for", player_name, "in", season, ": Data not available"))
+      return(tibble())
+    }
+  })
+})
+
+
+
+
+
+shots_clean <- shots_data_all %>%
+  mutate(
+    made = as.numeric(SHOT_MADE_FLAG),
+    distance = as.numeric(SHOT_DISTANCE),
+    is_2pt = ifelse(SHOT_TYPE == "2PT Field Goal", 1, 0),
+    zone = factor(SHOT_ZONE_BASIC),
+    move_type = factor(ACTION_TYPE),
+    is_home = ifelse(TEAM_NAME == HTM, 1, 0)
+  ) %>%
+  select(player_name, season, GAME_ID, PERIOD, MINUTES_REMAINING, SECONDS_REMAINING,
+         made, distance, is_home, zone, move_type, is_2pt)
+
+
+shots_clean <- shots_clean %>%
+  arrange(player_name, GAME_ID, PERIOD, desc(MINUTES_REMAINING), desc(SECONDS_REMAINING)) %>%
+  group_by(player_name, GAME_ID) %>%
+  mutate(prev_shot = lag(made, 1)) %>%
+  ungroup()
+
+
+model_data <- shots_clean %>%
+  filter(!is.na(prev_shot), !is.na(distance))
+
+
+hot_hand_model <- glmer(
+  made ~ prev_shot + distance + is_2pt + zone + is_home + move_type + (1 | player_name),
+  data = model_data,
+  family = binomial(link = "logit"),
+  control = glmerControl(optimizer = "nloptwrap")
+)
+hot_hand_model <- glmer(
+  made ~ prev_shot + distance + (1 | player_name),
+  data = shots_clean,
+  family = binomial(link = "logit")
+)
+
+colnames(shots_clean)
+
+
+
+
+summary(hot_hand_model)
+
+
+model_data$predicted_prob <- predict(hot_hand_model, type = "response")
+
+ggplot(model_data, aes(x = factor(prev_shot), y = predicted_prob, fill = factor(prev_shot))) +
+  geom_boxplot() +
+  facet_wrap(~ player_name, scales = "free_y") +
+  labs(
+    title = "Predicted Probability of Making a Shot After a Make or Miss",
+    x = "Previous Shot Result (0 = Miss, 1 = Make)",
+    y = "Predicted Probability"
+  ) +
+  theme_minimal()
+
+
+ggplot(shots_clean, aes(x = prev_shot, y = distance, color = player_name)) +
+  geom_jitter(alpha = 0.5) +
+  labs(
+    title = "Shot Distance vs Previous Shot Result",
+    x = "Previous Shot Result",
+    y = "Shot Distance (feet)",
+    color = "Player"
+  ) +
+  theme_minimal()
+
+
+shot_zone_count <- shots_clean %>%
+  group_by(player_name, zone) %>%
+  summarize(total_shots = n(), .groups = "drop")
+
+ggplot(shot_zone_count, aes(x = zone, y = total_shots, fill = player_name)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Shot Distribution by Zone",
+    x = "Shot Zone",
+    y = "Total Shots",
+    fill = "Player"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
